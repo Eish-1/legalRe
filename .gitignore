@@ -1,2 +1,4 @@
 hello.py
 hello-world/*
+.venv
+.env

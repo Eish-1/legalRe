@@ -3,8 +3,11 @@ import streamlit as st
 import random
 import time
 import base64
-from lawglance_main import Lawglance
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+# from legalre_main import LegalRe # Old import
+from src.legalre_main import LegalRe # Corrected import path
+from langchain_groq import ChatGroq
+# from langchain_community.embeddings import HuggingFaceEmbeddings # Deprecated
+from langchain_huggingface import HuggingFaceEmbeddings # New import
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from dotenv import load_dotenv
@@ -13,7 +16,7 @@ import uuid
 
 #This page implements the streamlit UI
 # Set page configuration
-st.set_page_config(page_title="LawGlance", page_icon="logo/logo.png", layout="wide")
+st.set_page_config(page_title="LegalRe", page_icon="logo/logo.png", layout="wide")
 
 # Custom CSS for better UI
 def add_custom_css():
@@ -109,23 +112,21 @@ if os.path.exists(logo_path):
         encoded_image = base64.b64encode(image_file.read()).decode()
     st.markdown(f"""
     <div class="st-title">
-        <img src="data:image/png;base64,{encoded_image}" alt="LawGlance Logo" class="logo">
-        <span>LawGlance - An AI Legal Assistant </span>
+        <img src="data:image/png;base64,{encoded_image}" alt="LegalRe Logo" class="logo">
+        <span>LegalRe - An AI Legal Assistant </span>
     </div>
     """, unsafe_allow_html=True)
 else:
     st.markdown("""
     <div class="st-title">
-        <span>LawGlance - Your Legal Assistant 📖</span>
+        <span>LegalRe - Your Legal Assistant 📖</span>
     </div>
     """, unsafe_allow_html=True)
 
 # Sidebar improvements
-st.sidebar.header("About LawGlance")
+st.sidebar.header("About LegalRe")
 st.sidebar.markdown("""
-**LawGlance** is a free, open-source AI legal assistant that helps answer legal questions.
-
-Visit our website: [LawGlance](https://lawglance.com)
+**LegalRe** is a free, open-source AI legal assistant that helps answer legal questions based on provided documents.
 
 _Disclaimer_: This tool is in its pilot phase, and responses may not be 100% accurate.
 """)
@@ -133,22 +134,66 @@ _Disclaimer_: This tool is in its pilot phase, and responses may not be 100% acc
 load_dotenv()
 
 #random thread id for session
-id = uuid.uuid4()
-thread_id = str(id)
+# Ensure session state for thread_id if needed across reruns, 
+# but for now, generating per run might be fine for basic history.
+if 'thread_id' not in st.session_state:
+     st.session_state.thread_id = str(uuid.uuid4())
+thread_id = st.session_state.thread_id
 
 # Load API key
-openai_api_key = os.getenv('OPENAI_API_KEY')
-#Defining the Language Model
-llm = ChatOpenAI(model  = 'gpt-4o-mini' ,temperature = 0.9, openai_api_key = openai_api_key)
+groq_api_key = os.getenv('GROQ_API_KEY')
 
-#Defining the Embeddings
-embeddings = OpenAIEmbeddings()
+# Check if the Groq API key is available
+if not groq_api_key:
+    st.error("GROQ_API_KEY not found in environment variables. Please set it in your .env file.")
+    st.stop() # Stop execution if key is missing
 
-#Defining the vector store
-vector_store = Chroma(persist_directory="chroma_db_legal_bot_part1", embedding_function=embeddings)
+# Caching functions
+@st.cache_resource # Cache the LLM client
+def get_llm(api_key):
+    print("Initializing Groq LLM...")
+    return ChatGroq(
+        model="deepseek-r1-distill-llama-70b",
+        temperature=0.7,
+        groq_api_key=api_key
+    )
 
-#Creating the instance of the class Lawglance
-law = Lawglance(llm, embeddings, vector_store)
+@st.cache_resource # Cache the embedding model
+def get_embedding_model():
+    EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+    print(f"Initializing embedding model for retrieval: {EMBEDDING_MODEL_NAME}")
+    model_kwargs = {'device': 'cpu'}
+    encode_kwargs = {'normalize_embeddings': False}
+    return HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL_NAME,
+        model_kwargs=model_kwargs,
+        encode_kwargs=encode_kwargs
+    )
+
+@st.cache_resource # Cache the vector store connection
+def get_vector_store(_embeddings): # Pass embeddings in to ensure consistency
+    CHROMA_DB_DIR = "chroma_db_legal_bot_part1"
+    print(f"Loading vector store from: {CHROMA_DB_DIR}")
+    if not os.path.isdir(CHROMA_DB_DIR):
+        st.error(f"ChromaDB directory not found at '{CHROMA_DB_DIR}'. Please run the embedding script (src/pdf_emb.py) first.")
+        st.stop()
+    vector_store = Chroma(
+        persist_directory=CHROMA_DB_DIR,
+        embedding_function=_embeddings
+    )
+    print(f"Loaded vector store with {vector_store._collection.count()} documents.")
+    return vector_store
+
+@st.cache_resource # Cache the main RAG class instance
+def get_legalre_instance(_llm, _embeddings, _vector_store):
+    print("Initializing LegalRe instance...")
+    return LegalRe(_llm, _embeddings, _vector_store)
+
+# Use cached functions for initialization
+llm = get_llm(groq_api_key)
+embeddings = get_embedding_model()
+vector_store = get_vector_store(embeddings)
+law = get_legalre_instance(llm, embeddings, vector_store)
 
 # Initialize chat history
 if "messages" not in st.session_state:
@@ -163,7 +208,7 @@ for message in st.session_state.messages:
 # Chat input prompt fixed at the bottom
 st.markdown("<div class='chat-input-container'>", unsafe_allow_html=True)
 # User Input
-prompt = st.chat_input("Have a legal question? Let’s work through it.")
+prompt = st.chat_input("Have a legal question? Let's work through it.")
 
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -177,21 +222,40 @@ if prompt:
 
     # Generate answer from LLM
     query = prompt
-    result = law.conversational(query, thread_id)
+    try:
+        # Invoke the conversational chain
+        result = law.conversational(query, thread_id)
+        final_response = result # Assuming result is the direct answer string now
+
+    except Exception as e:
+        st.error(f"An error occurred while processing your request: {e}")
+        final_response = "Sorry, I encountered an error. Please try again."
+        # Log the error for debugging
+        print(f"Error during conversational invocation: {e}")
 
     # Assistant's response
-    def response_generator(result):
-        response = random.choice([result])
-        for word in response.split():
+    def response_generator(response_text):
+        # Simplified response generator - directly yield the final answer
+        for word in response_text.split():
             yield word + " "
-            time.sleep(0.05)
-
-    final_response = f"AI Legal Assistant: {result}"
+            time.sleep(0.02) # Slightly faster typing effect
 
     # Display assistant response in chat message container
-    with st.chat_message("assistant"):
-        response = "".join(list(response_generator(final_response)))
-        st.markdown(response)
-
-    # Add assistant response to chat history
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    # Get the container object first
+    chat_container_obj = st.chat_message("assistant") 
+    # Use the obtained object as the context manager
+    with chat_container_obj: 
+        # Use write_stream for smoother output
+        # Check if final_response is not None and is a string
+        if isinstance(final_response, str):
+                # Use the container object directly
+                response = chat_container_obj.write_stream(response_generator(final_response)) 
+                # Add assistant response to chat history ONLY IF IT'S A STRING
+                st.session_state.messages.append({"role": "assistant", "content": response})
+        else:
+                # Handle cases where the response might not be a string (e.g., error object, None)
+                error_message = f"Received unexpected response format: {type(final_response)}"
+                print(error_message)
+                # Use the container object directly
+                chat_container_obj.error(error_message) 
+                st.session_state.messages.append({"role": "assistant", "content": "Error: Received unexpected response format."})

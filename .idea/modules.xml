@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/lawglance.iml" filepath="$PROJECT_DIR$/.idea/lawglance.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/legalRe.iml" filepath="$PROJECT_DIR$/.idea/legalRe.iml" />
     </modules>
   </component>
 </project>
