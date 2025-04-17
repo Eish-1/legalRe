@@ -25,26 +25,9 @@ This project is developed with support from mentors and experts at [Data Science
 
 **LegalRe** works with the PDF documents you provide in the `pdf_data` directory. The accuracy and scope of its responses depend entirely on the content of those documents.
 
-Originally launched as [Niyam SahaAI](https://github.com/niyam-sahaai/niyam-sahaai), **LegalRe** is a versatile RAG framework.
-
 ---
 
 ## 🎥 **Video Tutorial**
-
-Curious how **LegalRe** works? Watch this detailed tutorial!
-
-[![Niyam SahaAI Tutorial](https://raw.githubusercontent.com/lawglance/lawglance/refs/heads/main/docs/Lawglance_youtube_video_thumbnail.png)](https://www.youtube.com/watch?v=sWpLEApQtvE "Niyam SahaAI Tutorial")
-
-<div>
-    <a href="https://www.loom.com/embed/dcc6b14c653c4618829f46a9aa2ab68c?sid=a5a73b89-88a5-4bc2-a633-f97792f6441f">
-      <p>LegalRe Tutorial</p>
-    </a>
-    <a href=https://www.loom.com/embed/dcc6b14c653c4618829f46a9aa2ab68c?sid=a5a73b89-88a5-4bc2-a633-f97792f6441f">
-      <img style="max-width:300px;" src="https://cdn.loom.com/sessions/thumbnails/576b26dcd5fb4d74a3a9e1f8187851bc-35587db59696dfef-full-play.gif">
-    </a>
-  </div>
-
----
 
 ## 💻 **Developer Quick Start Guide**
 
