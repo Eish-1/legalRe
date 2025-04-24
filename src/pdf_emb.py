@@ -40,7 +40,7 @@ def extract_text_from_pdf(pdf_path):
 # 3. Process all PDFs in the directory structure
 def process_pdfs_to_langchain_docs(root_dir):
 
-    """Processes all PDFs in root_dir, extracts text, and returns LangChain Documents."""
+    """Processes all PDFs in root_dir, extracts text, and returns LangChain Documents with filename metadata."""
     langchain_documents = []
     for root, _, files in os.walk(root_dir):
         for file in files:
@@ -50,7 +50,7 @@ def process_pdfs_to_langchain_docs(root_dir):
                 text = extract_text_from_pdf(pdf_path)
                 if text:
                     # Create a LangChain Document object
-                    # Metadata helps in filtering or understanding the source later
+                    # Add filename to metadata for filtering
                     metadata = {"source": pdf_path, "filename": file}
                     langchain_documents.append(Document(page_content=text, metadata=metadata))
                 else:
@@ -61,14 +61,16 @@ def process_pdfs_to_langchain_docs(root_dir):
 def split_documents(documents):
 
     """Splits LangChain Documents into smaller chunks using RecursiveCharacterTextSplitter."""
+    # Switch back to RecursiveCharacterTextSplitter for potentially better RAG chunks
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=1000, # RAG often benefits from slightly larger chunks
+        chunk_overlap=150,
         length_function=len,
-        add_start_index=True, # Optional: adds chunk start index to metadata
-        separators=["\n\n", "\n", ".", " ", ""] # Prioritize splitting on paragraphs, sentences, spaces
+        add_start_index=True, 
+        separators=["\n\n", "\n", ".", " ", ""] 
     )
     chunks = text_splitter.split_documents(documents)
+    # Important: The metadata from the original document is preserved in the chunks
     print(f"Split {len(documents)} documents into {len(chunks)} chunks.")
     return chunks
 

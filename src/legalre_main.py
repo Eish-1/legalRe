@@ -10,6 +10,17 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough, Runnab
 from sentence_transformers import CrossEncoder # Import CrossEncoder
 import os # Import os for basename
 import re # Import the regex module
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,  # Set default level
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+
+# Create a logger for this module
+logger = logging.getLogger('legalre')
 
 #This Class deals with working of Chatbot
 
@@ -30,66 +41,72 @@ class LegalRe:
       law.conversational(query2)
     """
     store = {}
-    # Initialize cross-encoder model once per class instance
-    cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2') 
+    # Make CrossEncoder lazy-loaded (only initialize when first needed)
+    _cross_encoder = None
+    
+    @classmethod
+    def get_cross_encoder(cls):
+        if cls._cross_encoder is None:
+            cls._cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        return cls._cross_encoder
 
     def __init__(self,llm,embeddings,vector_store):
       self.llm = llm
       self.embeddings = embeddings
       self.vector_store = vector_store
 
-    def __retriever(self):
-      """The function to define the properties of retriever"""
-      # Retrieve more documents initially for re-ranking + add threshold
+    def __retriever(self, filename_filter=None):
+      """The function to define the properties of retriever, optionally filtering by filename."""
+      
+      search_kwargs={ # Base search settings
+              "k": 15, 
+              "score_threshold": 0.25
+          }
+      
+      # Add metadata filter if filename_filter is provided
+      if filename_filter:
+          search_kwargs['filter'] = {'filename': filename_filter}
+          logger.info(f"Retriever filter: '{filename_filter}'")
+      else:
+           logger.info("General search (no filter)")
+           
       retriever = self.vector_store.as_retriever(
-          search_type="similarity_score_threshold", # Changed back to use threshold
-          search_kwargs={
-              "k": 15, # Retrieve top 15 initially
-              "score_threshold": 0.25 # Add a threshold (adjust as needed)
-              } 
+          search_type="similarity_score_threshold", 
+          search_kwargs=search_kwargs
           )
       return retriever
 
-    # Function to perform re-ranking (defined outside llm_answer_generator for clarity)
-    @staticmethod # Make it static as it doesn't need self here
+    @staticmethod 
     def rerank_documents(inputs):
-        query = inputs['input'] # Get the user query
-        docs = inputs['context'] # Get the initially retrieved documents
+        query = inputs['input']
+        docs = inputs['context']
         
-        # Check if docs is empty or None
         if not docs:
-            print("-- No documents retrieved for re-ranking (threshold likely too high or no matches) --")
-            return [] # Return empty list if no docs
-
-        print(f"-- Re-ranking {len(docs)} initial documents --")
+            logger.info("No documents retrieved for re-ranking")
+            return []
         
-        # Prepare pairs of [query, doc_content] for the cross-encoder
+        logger.info(f"Re-ranking {len(docs)} documents")
         pairs = [[query, doc.page_content] for doc in docs]
-        
-        # Get scores from the cross-encoder
-        # Use the class instance's cross_encoder
-        scores = LegalRe.cross_encoder.predict(pairs)
-        
-        # Combine docs and scores, then sort by score in descending order
+        scores = LegalRe.get_cross_encoder().predict(pairs)
         docs_with_scores = list(zip(docs, scores))
         sorted_docs = sorted(docs_with_scores, key=lambda x: x[1], reverse=True)
         
-        # Select the top N re-ranked documents (e.g., top 3)
         top_n = 3
         reranked_docs = [doc for doc, score in sorted_docs[:top_n]]
         
-        print(f"-- Reranked Top {top_n} Docs Passed to LLM --")
+        # Only log the essential information for top docs
+        logger.info(f"Top {top_n} documents:")
         for i, doc in enumerate(reranked_docs):
-            source = doc.metadata.get('source', 'N/A') if hasattr(doc, 'metadata') else 'N/A'
-            print(f"Doc {i+1} Score: {sorted_docs[i][1]:.4f} Source: {source}")
-            # print(f"   Content: {doc.page_content[:150]}...") # Optional: print snippet
-        print("-----")
+            filename = doc.metadata.get('filename', 'Unknown')
+            score = sorted_docs[i][1]
+            logger.info(f"  Doc {i+1}: {filename} (Score: {score:.4f})")
         
         return reranked_docs
 
-    def llm_answer_generator(self,query):
+    def llm_answer_generator(self, query, filename_filter=None):
       llm = self.llm
-      retriever = self.__retriever()
+      # Pass filter to retriever
+      retriever = self.__retriever(filename_filter=filename_filter) 
 
       contextualize_q_system_prompt = (
           "Given a chat history and the latest user question "
@@ -121,7 +138,7 @@ Follow this workflow precisely:
 
 1.  **Analyze Request:** You will receive a user query (`{input}`) and chat history. You might also receive relevant document excerpts (`{context}`).
 2.  **Generate Response:**
-    Guidelines for Answering:
+        Guidelines for Answering:
       - Analyze the user's question carefully.
       - Scrutinize the provided context documents ({context}) thoroughly.
       - Synthesize an accurate answer based *exclusively* on the information found in the context.
@@ -189,7 +206,7 @@ Answer:""" # Removed explicit User Query/Context fields, handled by chain
       # Condition: Check if the 'context' key (after re-ranking) is empty list
       def check_if_docs_exist(inputs):
             context = inputs.get('context', [])
-            print(f"Checking docs for branching. Found: {len(context)} documents.")
+            logger.info(f"Checking docs for branching. Found: {len(context)} documents.")
             return bool(context) # True if list is not empty
 
       # Define the branch runnable
@@ -225,26 +242,24 @@ Answer:""" # Removed explicit User Query/Context fields, handled by chain
           LegalRe.store[session_id] = ChatMessageHistory()
       return LegalRe.store[session_id]
     
-    def conversational(self,query,session_id):
-      # Get the full chain pipeline
-      rag_chain_with_history_handling = self.llm_answer_generator(query) 
+    def conversational(self, query, session_id, filename_filter=None):
+      # Pass filter to generator
+      rag_chain_with_history_handling = self.llm_answer_generator(query, filename_filter=filename_filter) 
       
-      # Wrap the entire pipeline with message history handling
       conversational_rag_chain = RunnableWithMessageHistory(
-          rag_chain_with_history_handling, # The pipeline including branching
+          rag_chain_with_history_handling, 
           self.get_session_history,
           input_messages_key="input",
           history_messages_key="chat_history",
-          output_messages_key="answer" # The key we added in the final Lambda
+          output_messages_key="answer"
       )
-      
       response = conversational_rag_chain.invoke(
-          {"input": query}, # Pass the query as 'input'
+          {"input": query}, 
           config={
               "configurable": {"session_id": session_id}
           },
       )
-
+      
       # --- Add Debugging ---
       # print(f"--- DEBUG: Full response from wrapped chain: {response}") 
       # print(f"--- DEBUG: Type of response: {type(response)}")

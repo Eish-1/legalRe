@@ -13,6 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from dotenv import load_dotenv
 from langchain.schema import HumanMessage
 import uuid
+import logging
 
 #This page implements the streamlit UI
 # Set page configuration
@@ -131,6 +132,35 @@ st.sidebar.markdown("""
 _Disclaimer_: This tool is in its pilot phase, and responses may not be 100% accurate.
 """)
 
+# Function to configure logging verbosity
+def configure_logging(verbose=False):
+    # Set the base level
+    base_level = logging.INFO if verbose else logging.WARNING
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=base_level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    
+    # Set specific modules to warning or higher to reduce noise
+    logging.getLogger('langchain').setLevel(logging.WARNING)
+    logging.getLogger('chromadb').setLevel(logging.WARNING)
+    logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    
+    # Keep LegalRe's own logs at the selected verbosity
+    logging.getLogger('legalre').setLevel(base_level)
+
+# Add to the sidebar (after the about section):
+with st.sidebar:
+    st.markdown("---")
+    verbose_logging = st.sidebar.checkbox("Verbose logging", value=False, help="Show detailed processing logs in the terminal")
+    # Configure logging based on user preference
+    configure_logging(verbose_logging)
+
 load_dotenv()
 
 #random thread id for session
@@ -149,40 +179,43 @@ if not groq_api_key:
     st.stop() # Stop execution if key is missing
 
 # Caching functions
-@st.cache_resource # Cache the LLM client
+@st.cache_resource(show_spinner=False)
 def get_llm(api_key):
-    print("Initializing Groq LLM...")
-    return ChatGroq(
-        model="deepseek-r1-distill-llama-70b",
-        temperature=0.7,
-        groq_api_key=api_key
-    )
+    with st.spinner("Initializing language model..."):
+        logging.info("Initializing Groq LLM...")
+        return ChatGroq(
+            model="deepseek-r1-distill-llama-70b",
+            temperature=0.7,
+            groq_api_key=api_key
+        )
 
-@st.cache_resource # Cache the embedding model
+@st.cache_resource(show_spinner=False)
 def get_embedding_model():
-    EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-    print(f"Initializing embedding model for retrieval: {EMBEDDING_MODEL_NAME}")
-    model_kwargs = {'device': 'cpu'}
-    encode_kwargs = {'normalize_embeddings': False}
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL_NAME,
-        model_kwargs=model_kwargs,
-        encode_kwargs=encode_kwargs
-    )
+    with st.spinner("Loading embedding model..."):
+        EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+        logging.info(f"Initializing embedding model: {EMBEDDING_MODEL_NAME}")
+        model_kwargs = {'device': 'cpu'}
+        encode_kwargs = {'normalize_embeddings': False}
+        return HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL_NAME,
+            model_kwargs=model_kwargs,
+            encode_kwargs=encode_kwargs
+        )
 
-@st.cache_resource # Cache the vector store connection
-def get_vector_store(_embeddings): # Pass embeddings in to ensure consistency
-    CHROMA_DB_DIR = "chroma_db_legal_bot_part1"
-    print(f"Loading vector store from: {CHROMA_DB_DIR}")
-    if not os.path.isdir(CHROMA_DB_DIR):
-        st.error(f"ChromaDB directory not found at '{CHROMA_DB_DIR}'. Please run the embedding script (src/pdf_emb.py) first.")
-        st.stop()
-    vector_store = Chroma(
-        persist_directory=CHROMA_DB_DIR,
-        embedding_function=_embeddings
-    )
-    print(f"Loaded vector store with {vector_store._collection.count()} documents.")
-    return vector_store
+@st.cache_resource(show_spinner=False)
+def get_vector_store(_embeddings):
+    with st.spinner("Connecting to document database..."):
+        CHROMA_DB_DIR = "chroma_db_legal_bot_part1"
+        logging.info(f"Loading vector store from: {CHROMA_DB_DIR}")
+        if not os.path.isdir(CHROMA_DB_DIR):
+            st.error(f"ChromaDB directory not found at '{CHROMA_DB_DIR}'. Please run the embedding script first.")
+            st.stop()
+        vector_store = Chroma(
+            persist_directory=CHROMA_DB_DIR,
+            embedding_function=_embeddings
+        )
+        logging.info(f"Loaded vector store with {vector_store._collection.count()} documents.")
+        return vector_store
 
 @st.cache_resource # Cache the main RAG class instance
 def get_legalre_instance(_llm, _embeddings, _vector_store):
