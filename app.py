@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 from langchain.schema import HumanMessage
 import uuid
 import logging
+from src.utils import get_pdf_text, get_text_chunks, generate_summary
+
+# Set up logger
+logger = logging.getLogger('legalre')
 
 #This page implements the streamlit UI
 # Set page configuration
@@ -99,6 +103,31 @@ def add_custom_css():
         .st-sidebar p {
             font-size: 14px;
             color: #666;
+        }
+        /* Document mode styles */
+        .document-summary {
+            background-color: #000000;
+            border-left: 4px solid #0066cc;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            color: #FFFFFF; /* Ensure text is white for contrast */
+        }
+        
+        /* Mode selector styles */
+        .stRadio > div {
+            background-color: #8B0000;
+            padding: 10px;
+            border-radius: 10px;
+        }
+        
+        /* Document info box */
+        .stAlert > div {
+            background-color: #8B0000;
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-top: 10px;
+            margin-bottom: 15px;
         }
     </style>
     """
@@ -235,8 +264,24 @@ if "messages" not in st.session_state:
 # Display chat messages from history on app rerun
 for message in st.session_state.messages:
     role = "user" if message["role"] == "user" else "assistant"
+    
+    # Check if this is a summary message (needs special styling)
+    is_summary = message.get("is_summary", False)
+    
     with st.chat_message(role):
-        st.markdown(message["content"])
+        if is_summary:
+            # Apply special styling for summary messages
+            st.markdown(
+                f"""
+                <div style="padding: 10px; border-radius: 10px; background-color: #000000; border-left: 4px solid #0066cc; color: #FFFFFF;">
+                {message["content"]}
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
+        else:
+            # Normal message display
+            st.markdown(message["content"])
 
 # Chat input prompt fixed at the bottom
 st.markdown("<div class='chat-input-container'>", unsafe_allow_html=True)
@@ -244,6 +289,97 @@ st.markdown("<div class='chat-input-container'>", unsafe_allow_html=True)
 prompt = st.chat_input("Have a legal question? Let's work through it.")
 
 st.markdown("</div>", unsafe_allow_html=True)
+
+# Initialize session state variables for document handling
+if "active_mode" not in st.session_state:
+    st.session_state.active_mode = "general"  # Default mode: "general" or "document"
+if "uploaded_document" not in st.session_state:
+    st.session_state.uploaded_document = None  # Will store document text
+if "document_summary" not in st.session_state:
+    st.session_state.document_summary = None  # Will store the summary
+if "document_name" not in st.session_state:
+    st.session_state.document_name = None  # Will store the document name
+
+# Sidebar with mode selection and file upload
+with st.sidebar:
+    st.header("Document Interaction")
+    
+    # File uploader for PDF documents
+    uploaded_file = st.file_uploader("Upload a legal document (PDF)", type=["pdf"])
+    
+    # Process uploaded document
+    if uploaded_file is not None and (st.session_state.document_name != uploaded_file.name):
+        with st.spinner("Processing document..."):
+            # Create temp directory if it doesn't exist
+            temp_dir = "temp_uploads"
+            if not os.path.exists(temp_dir):
+                os.makedirs(temp_dir)
+            
+            # Save the uploaded file temporarily
+            temp_path = os.path.join(temp_dir, uploaded_file.name)
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            try:
+                # Extract text from PDF
+                doc_text = get_pdf_text(temp_path)
+                
+                if doc_text:
+                    # Split into chunks for processing
+                    text_chunks = get_text_chunks(doc_text)
+                    
+                    if text_chunks:
+                        # Generate summary
+                        summary = generate_summary(text_chunks, groq_api_key)
+                        
+                        # Store in session state
+                        st.session_state.uploaded_document = doc_text
+                        st.session_state.document_summary = summary
+                        st.session_state.document_name = uploaded_file.name
+                        
+                        # Switch to document mode automatically
+                        st.session_state.active_mode = "document"
+                        
+                        # Add summary as a special message in the chat
+                        if "messages" in st.session_state:
+                            # Add a system message with the summary
+                            summary_message = {
+                                "role": "assistant",
+                                "content": f"📄 **Document Summary: {uploaded_file.name}**\n\n{summary}",
+                                "is_summary": True  # Custom flag to style differently
+                            }
+                            st.session_state.messages.append(summary_message)
+                    else:
+                        st.error("Could not process document - no text chunks generated.")
+                else:
+                    st.error("Could not extract text from the PDF.")
+                
+                # Clean up temp file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    
+            except Exception as e:
+                st.error(f"Error processing document: {e}")
+                logger.error(f"Document processing error: {e}")
+    
+    # Mode selector (only show if a document is loaded)
+    if st.session_state.uploaded_document is not None:
+        st.divider()
+        mode = st.radio(
+            "Conversation Mode:",
+            options=["Document Q&A", "General Legal Knowledge"],
+            index=0 if st.session_state.active_mode == "document" else 1,
+            key="mode_selector"
+        )
+        
+        # Update active mode based on selection
+        st.session_state.active_mode = "document" if mode == "Document Q&A" else "general"
+        
+        # Show current mode
+        if st.session_state.active_mode == "document":
+            st.info(f"📄 Answering questions about: {st.session_state.document_name}")
+        else:
+            st.info("💬 Using general legal knowledge")
 
 if prompt:
     # Display user message in chat message container
@@ -253,42 +389,64 @@ if prompt:
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Generate answer from LLM
-    query = prompt
+    # Different processing based on mode
     try:
-        # Invoke the conversational chain
-        result = law.conversational(query, thread_id)
-        final_response = result # Assuming result is the direct answer string now
-
+        with st.spinner("Thinking..."):
+            if st.session_state.active_mode == "document" and st.session_state.uploaded_document:
+                # Document mode: Create on-the-fly embeddings for the document
+                # and query against it
+                
+                # Check if we need to generate document embeddings
+                if "document_embeddings" not in st.session_state or st.session_state.document_name != getattr(st.session_state, "last_embedded_doc", None):
+                    logger.info(f"Generating embeddings for document: {st.session_state.document_name}")
+                    
+                    # Split the document text into chunks
+                    doc_chunks = get_text_chunks(st.session_state.uploaded_document)
+                    
+                    # Create document objects with metadata
+                    from langchain.schema import Document
+                    doc_objects = [
+                        Document(
+                            page_content=chunk, 
+                            metadata={"filename": st.session_state.document_name, "source": "uploaded_document"}
+                        ) 
+                        for chunk in doc_chunks
+                    ]
+                    
+                    # Create temporary vector store with document embeddings
+                    from langchain_chroma import Chroma
+                    st.session_state.document_embeddings = Chroma.from_documents(
+                        documents=doc_objects,
+                        embedding=embeddings,  # Use the same embeddings model
+                        collection_name="temp_uploaded_doc"  # Name for temporary collection
+                    )
+                    
+                    # Mark which document was embedded
+                    st.session_state.last_embedded_doc = st.session_state.document_name
+                
+                # Use the document-specific filter
+                result = law.conversational(
+                    query=prompt, 
+                    session_id=f"{thread_id}_document",  # Use separate session ID for document context
+                    filename_filter=st.session_state.document_name  # Filter by document name
+                )
+            else:
+                # General mode: Use the pre-loaded vector store
+                result = law.conversational(
+                    query=prompt,
+                    session_id=thread_id,  # Use main session ID
+                    filename_filter=None  # No filter - search all documents
+                )
+            
+            final_response = result
     except Exception as e:
-        st.error(f"An error occurred while processing your request: {e}")
-        final_response = "Sorry, I encountered an error. Please try again."
-        # Log the error for debugging
-        print(f"Error during conversational invocation: {e}")
+        st.error(f"An error occurred: {e}")
+        logger.error(f"Error during conversation: {e}")
+        final_response = f"Sorry, I encountered an error: {e}"
 
-    # Assistant's response
-    def response_generator(response_text):
-        # Simplified response generator - directly yield the final answer
-        for word in response_text.split():
-            yield word + " "
-            time.sleep(0.02) # Slightly faster typing effect
-
-    # Display assistant response in chat message container
-    # Get the container object first
-    chat_container_obj = st.chat_message("assistant") 
-    # Use the obtained object as the context manager
-    with chat_container_obj: 
-        # Use write_stream for smoother output
-        # Check if final_response is not None and is a string
-        if isinstance(final_response, str):
-                # Use the container object directly
-                response = chat_container_obj.write_stream(response_generator(final_response)) 
-                # Add assistant response to chat history ONLY IF IT'S A STRING
-                st.session_state.messages.append({"role": "assistant", "content": response})
-        else:
-                # Handle cases where the response might not be a string (e.g., error object, None)
-                error_message = f"Received unexpected response format: {type(final_response)}"
-                print(error_message)
-                # Use the container object directly
-                chat_container_obj.error(error_message) 
-                st.session_state.messages.append({"role": "assistant", "content": "Error: Received unexpected response format."})
+    # Display the response
+    with st.chat_message("assistant"):
+        st.markdown(final_response)
+    
+    # Add to chat history
+    st.session_state.messages.append({"role": "assistant", "content": final_response})
